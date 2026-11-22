@@ -317,6 +317,11 @@ const qa = new URLSearchParams(location.search).get('admin');
 if (qa && qa === CONFIG.ADMIN_CODE) store.set('mr_admin', qa);
 S.admin = store.get('mr_admin') === CONFIG.ADMIN_CODE && CONFIG.ADMIN_CODE !== '';
 const getKey = () => (store.get('mr_key') || CONFIG.IMGCHEST_API_KEY || '').trim();
+const myUid = (() => {
+  let u = store.get('mr_uid');
+  if (!u) { u = (window.crypto && crypto.randomUUID) ? crypto.randomUUID() : String(Date.now()) + Math.random().toString(36).slice(2); store.set('mr_uid', u); }
+  return u;
+})();
 
 const curChapter = () => S.chapters.find(c => c.id === S.chapterId);
 const sortedNotes = () => [...S.notes].sort((a, b) => (a.page - b.page) || (a.y - b.y) || (a.x - b.x) || ((a.createdAt || 0) - (b.createdAt || 0)));
@@ -602,7 +607,7 @@ function startNote(page, pos) {
     if (!t) { text.focus(); return toast('اكتب الملاحظة', 'err'); }
     saveBtn.disabled = true;
     try {
-      await addDoc(collection(db, 'notes'), { chapterId: S.chapterId, page, x: pos.x, y: pos.y, author, text: t, suggestion: sug.value.trim(), done: false, createdAt: Date.now() });
+      await addDoc(collection(db, 'notes'), { chapterId: S.chapterId, page, x: pos.x, y: pos.y, author, text: t, suggestion: sug.value.trim(), done: false, uid: myUid, createdAt: Date.now() });
       store.set('mr_name', author);
       m.close();
       toast('تم حفظ الملاحظة');
@@ -617,20 +622,49 @@ function openNote(id) {
   if (!n) return;
   const num = sortedNotes().findIndex(x => x.id === id) + 1;
   const actions = [];
-  if (S.admin) {
+  const isOwner = !!n.uid && n.uid === myUid;
+  if (S.admin || isOwner) {
     actions.push(
       h('button', { class: 'btn danger', onclick: async () => { if (await confirmBox('حذف الملاحظة', 'سيتم حذف هذه الملاحظة نهائيا.', 'حذف', true)) { await deleteDoc(doc(db, 'notes', id)); m.close(true); toast('تم الحذف'); } } }, icon('trash'), 'حذف'),
-      h('button', { class: 'btn ' + (n.done ? '' : 'primary'), onclick: async () => { await updateDoc(doc(db, 'notes', id), { done: !n.done }); m.close(true); } }, icon('check'), n.done ? 'إعادة فتح' : 'تم التعديل'));
+      h('button', { class: 'btn', onclick: () => { m.close(true); editNote(n); } }, 'تعديل'));
+  }
+  if (S.admin) {
+    actions.push(h('button', { class: 'btn ' + (n.done ? '' : 'primary'), onclick: async () => { await updateDoc(doc(db, 'notes', id), { done: !n.done }); m.close(true); } }, icon('check'), n.done ? 'إعادة فتح' : 'تم التعديل'));
   }
   const m = modal({
     title: 'ملاحظة #' + num + ' · صفحة ' + (n.page + 1),
     body: [
-      h('div', { class: 'meta' }, h('b', { style: { color: 'var(--tx)' } }, n.author || 'مجهول'), h('span', {}, fmtTime(n.createdAt)), h('span', { class: 'tag' + (n.done ? ' ok' : '') }, n.done ? 'منجزة' : 'مفتوحة')),
+      h('div', { class: 'meta' }, h('b', { style: { color: 'var(--tx)' } }, n.author || 'مجهول'), h('span', {}, fmtTime(n.createdAt) + (n.editedAt ? ' (معدّلة)' : '')), h('span', { class: 'tag' + (n.done ? ' ok' : '') }, n.done ? 'منجزة' : 'مفتوحة')),
       h('div', {}, h('div', { class: 'lbl' }, 'الملاحظة'), h('div', { class: 'read', dir: 'auto' }, n.text)),
       n.suggestion ? h('div', {}, h('div', { class: 'lbl' }, 'الاقتراح'), h('div', { class: 'read sg', dir: 'auto' }, n.suggestion)) : null
     ],
     actions: actions.length ? actions : null
   });
+}
+
+/* ---------- تعديل ملاحظة ---------- */
+function editNote(n) {
+  const text = h('textarea', { class: 'inp', rows: '3', maxlength: '1000' });
+  text.value = n.text || '';
+  const sug = h('textarea', { class: 'inp', rows: '2', maxlength: '1000', placeholder: 'اقتراحك (اختياري)' });
+  sug.value = n.suggestion || '';
+  const saveBtn = h('button', { class: 'btn primary' }, 'حفظ التعديل');
+  const m = modal({
+    title: 'تعديل الملاحظة',
+    body: [field('الملاحظة', text), field('الاقتراح', sug)],
+    actions: [h('button', { class: 'btn', onclick: () => m.close() }, 'إلغاء'), saveBtn]
+  });
+  saveBtn.addEventListener('click', async () => {
+    const t = text.value.trim();
+    if (!t) { text.focus(); return toast('الملاحظة لا يمكن أن تكون فارغة', 'err'); }
+    saveBtn.disabled = true;
+    try {
+      await updateDoc(doc(db, 'notes', n.id), { text: t, suggestion: sug.value.trim(), editedAt: Date.now() });
+      m.close();
+      toast('تم تعديل الملاحظة');
+    } catch (e) { saveBtn.disabled = false; toast('تعذر الحفظ: ' + e.message, 'err'); }
+  });
+  setTimeout(() => text.focus(), 260);
 }
 
 /* ==========================================================================
