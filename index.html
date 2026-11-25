@@ -520,6 +520,7 @@ function buildReader(ch) {
       h('h3', {}, 'الملاحظات', h('button', { class: 'icon-btn', 'aria-label': 'إغلاق', onclick: togglePanel }, icon('x'))),
       h('div', { class: 'tabs' }, tabAll, tabOpen, tabDone),
       h('div', { class: 'search' }, icon('search'), searchIn)),
+    h('div', { id: 'finbox' }),
     h('div', { class: 'p-list', id: 'plist' }));
   main.replaceChildren(h('div', { class: 'layout' }, reader, panel));
   S.zoom = 1;
@@ -549,6 +550,7 @@ function setFilter(f) { S.filter = f; renderPanel(); }
 function renderPanel() {
   const list = $('#plist');
   if (!list) return;
+  renderFinishBox();
   const all = sortedNotes().map((n, i) => ({ n, num: i + 1 }));
   const cOpen = all.filter(x => !x.n.done).length;
   const set = (id, txt, on) => { const b = $(id); if (b) { b.textContent = txt; b.classList.toggle('on', on); } };
@@ -793,6 +795,8 @@ async function openDeleteChapter(ch) {
     let batch = writeBatch(db), c = 0;
     for (const d of snap.docs) { batch.delete(d.ref); if (++c % 450 === 0) { await batch.commit(); batch = writeBatch(db); } }
     await batch.commit();
+    const fsnap = await getDocs(query(collection(db, 'finishes'), where('chapterId', '==', ch.id)));
+    for (const d of fsnap.docs) await deleteDoc(d.ref);
     await deleteDoc(doc(db, 'chapters', ch.id));
     bar.style.width = '100%';
     say(fails ? `انتهى مع ${fails} فشل في imgchest (احذفها يدويا).` : 'اكتمل الحذف.');
@@ -841,6 +845,7 @@ function route() {
     S.chapterId = id; S.builtFor = null; S.search = ''; S.filter = 'all';
     if (S.pinMode) togglePin(false);
     subscribeNotes(id);
+    subscribeFinishes(id);
   }
   render();
 }
@@ -857,6 +862,126 @@ function setupScreen() {
       h('li', {}, 'الصقها في ', h('code', {}, 'CONFIG.firebase'), ' أعلى ملف index.html على GitHub'),
       h('li', {}, 'غيّر ', h('code', {}, 'ADMIN_CODE'), ' إلى كود سري خاص بك')))));
 }
+
+/* ---------- انتهاء التدقيق ---------- */
+
+const FIN = { list: [], unsub: null };
+
+
+
+function subscribeFinishes(id) {
+
+  if (FIN.unsub) { FIN.unsub(); FIN.unsub = null; }
+
+  FIN.list = [];
+
+  renderFinishBox();
+
+  if (!id || !db) return;
+
+  FIN.unsub = onSnapshot(query(collection(db, 'finishes'), where('chapterId', '==', id)), snap => {
+
+    FIN.list = snap.docs.map(d => ({ id: d.id, ...d.data() })).sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0));
+
+    renderFinishBox();
+
+  }, err => toast('تعذر قراءة قائمة من أنهوا التدقيق: ' + err.message, 'err'));
+
+}
+
+
+
+function renderFinishBox() {
+
+  const box = document.getElementById('finbox');
+
+  if (!box) return;
+
+  box.replaceChildren();
+
+  box.style.padding = '0 16px 8px';
+
+  const wrap = h('div', { style: { background: 'var(--s2)', borderRadius: '14px', padding: '12px 14px' } },
+
+    h('div', { style: { fontWeight: '700', marginBottom: '8px', display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '8px' } },
+
+      h('span', {}, 'انتهى التدقيق (' + FIN.list.length + ')'),
+
+      h('button', { class: 'btn primary', style: { height: '32px', padding: '0 12px', fontSize: '13px' }, onclick: openFinish }, 'أنهيت التدقيق')));
+
+  if (!FIN.list.length) wrap.append(h('div', { class: 'hint' }, 'لم يعلن أحد انتهاءه بعد'));
+
+  FIN.list.forEach(f => {
+
+    const mine = S.admin || (f.uid && f.uid === myUid);
+
+    wrap.append(h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '8px', padding: '5px 0', fontSize: '14px' } },
+
+      h('span', {}, '✓ ' + f.name, h('span', { style: { color: 'var(--tx3)', fontSize: '12px' } }, '  ' + fmtTime(f.createdAt))),
+
+      mine ? h('button', {
+
+        class: 'icon-btn', style: { width: '28px', height: '28px', borderRadius: '8px' }, 'aria-label': 'إزالة',
+
+        onclick: async () => { if (await confirmBox('إزالة الاسم', 'هل تريد إزالة ' + f.name + ' من قائمة من أنهوا التدقيق؟', 'إزالة', true)) { await deleteDoc(doc(db, 'finishes', f.id)); } }
+
+      }, icon('x')) : null));
+
+  });
+
+  box.append(wrap);
+
+}
+
+
+
+function openFinish() {
+
+  if (!db || !S.chapterId) return;
+
+  const name = h('input', { class: 'inp', placeholder: 'اسمك', value: store.get('mr_name') || '', maxlength: '40' });
+
+  const saveBtn = h('button', { class: 'btn primary' }, 'تأكيد');
+
+  const m = modal({
+
+    title: 'إعلان انتهاء التدقيق',
+
+    body: [h('div', { class: 'hint' }, 'سيظهر اسمك في اللوحة كمن أنهى تدقيق هذا الفصل. لا يتغير شيء آخر.'), field('الاسم', name)],
+
+    actions: [h('button', { class: 'btn', onclick: () => m.close() }, 'إلغاء'), saveBtn]
+
+  });
+
+  saveBtn.addEventListener('click', async () => {
+
+    const nm = name.value.trim();
+
+    if (!nm) { name.focus(); return toast('اكتب اسمك', 'err'); }
+
+    if (FIN.list.some(f => f.name === nm)) return toast('هذا الاسم مسجل بالفعل', 'err');
+
+    saveBtn.disabled = true;
+
+    try {
+
+      await addDoc(collection(db, 'finishes'), { chapterId: S.chapterId, name: nm, uid: myUid, createdAt: Date.now() });
+
+      store.set('mr_name', nm);
+
+      m.close();
+
+      toast('تم تسجيل انتهاء تدقيقك');
+
+    } catch (e) { saveBtn.disabled = false; toast('تعذر الحفظ: ' + e.message, 'err'); }
+
+  });
+
+  setTimeout(() => name.focus(), 260);
+
+}
+
+
 
 /* ---------- البدء ---------- */
 window.addEventListener('hashchange', route);
